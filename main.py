@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import time
+from decimal import Decimal
 from pathlib import Path
 
 if sys.platform == "win32":
@@ -20,8 +21,8 @@ from services.bitget_client import BitgetAPIError, BitgetRestClient
 from services.bitget_spot import BitgetSpotPortfolioRepository, BitgetSpotPriceProvider
 from services.telegram_notify import send_portfolio_telegram, send_telegram_plain
 
-POLL_SEC = 30
-TELEGRAM_INTERVAL_SEC = 60.0
+POLL_SEC = 5 * 60
+BALANCE_CHANGE_THRESHOLD = Decimal("0.001")
 
 
 def _log(log, snap, visible) -> None:
@@ -55,7 +56,7 @@ def main() -> None:
     tr = PortfolioTracker()
     log.info("Інтервал %s с, Ctrl+C — стоп.", POLL_SEC)
     if s.telegram_enabled():
-        log.info("Telegram: таблиця кожні %s с.", int(TELEGRAM_INTERVAL_SEC))
+        log.info("Telegram: надсилання тільки при зміні балансу > 0.1%%")
         try:
             assert s.telegram_token and s.telegram_chat_id
             send_telegram_plain(
@@ -67,7 +68,7 @@ def main() -> None:
         except Exception as exc:
             log.warning("Telegram (старт): %s", exc)
 
-    last_telegram = 0.0
+    previous_total_value: Decimal | None = None
 
     try:
         while True:
@@ -82,18 +83,28 @@ def main() -> None:
             else:
                 _log(log, snap, tr.significant_holdings(snap))
                 if s.telegram_enabled():
-                    now = time.monotonic()
-                    if last_telegram == 0.0 or (now - last_telegram) >= TELEGRAM_INTERVAL_SEC:
-                        try:
-                            assert s.telegram_token and s.telegram_chat_id
-                            send_portfolio_telegram(
-                                s.telegram_token,
-                                s.telegram_chat_id,
-                                snap,
-                            )
-                            last_telegram = now
-                        except Exception as exc:
-                            log.warning("Telegram: %s", exc)
+                    if previous_total_value is None:
+                        previous_total_value = snap.total_value_usd
+                    else:
+                        if previous_total_value == 0:
+                            changed = snap.total_value_usd != 0
+                        else:
+                            changed = (
+                                abs(snap.total_value_usd - previous_total_value)
+                                / previous_total_value
+                            ) >= BALANCE_CHANGE_THRESHOLD
+
+                        if changed:
+                            try:
+                                assert s.telegram_token and s.telegram_chat_id
+                                send_portfolio_telegram(
+                                    s.telegram_token,
+                                    s.telegram_chat_id,
+                                    snap,
+                                )
+                            except Exception as exc:
+                                log.warning("Telegram: %s", exc)
+                        previous_total_value = snap.total_value_usd
             try:
                 time.sleep(POLL_SEC)
             except KeyboardInterrupt:
